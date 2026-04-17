@@ -1,0 +1,5 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pyautogui==0.9.54
+mss==9.0.2
+websockets==13.1
