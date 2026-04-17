@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
-import { Paper, Text, Stack, Notification } from '@mantine/core'
+import { Paper, Text, Stack, Notification, SegmentedControl } from '@mantine/core'
 
 const getWsUrl = (apiBase) => {
   const apiUrl = new URL(apiBase)
@@ -10,6 +10,7 @@ const getWsUrl = (apiBase) => {
 export default function InterventionDashboard({ apiBase }) {
   const imgRef = useRef(null)
   const [connected, setConnected] = useState(false)
+  const [actionMode, setActionMode] = useState('click')
   const [lastClick, setLastClick] = useState(null)
   const [feedback, setFeedback] = useState(null)
 
@@ -85,7 +86,7 @@ export default function InterventionDashboard({ apiBase }) {
         const res = await fetch(`${apiBase}/api/intervene`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ x, y }),
+          body: JSON.stringify({ x, y, action: actionMode }),
         })
         const data = await res.json()
         setFeedback({ type: 'success', message: data.message })
@@ -96,16 +97,26 @@ export default function InterventionDashboard({ apiBase }) {
       // Clear feedback after 3 seconds
       setTimeout(() => setFeedback(null), 3000)
     },
-    [apiBase],
+    [actionMode, apiBase],
   )
 
   return (
     <Stack gap="sm">
       <Text size="sm" c="dimmed">
         {connected
-          ? 'Connected — click on the screen feed to intervene'
+          ? `Connected — click on the screen feed to ${actionMode === 'move' ? 'move mouse' : 'click'}`
           : 'Connecting to screen feed…'}
       </Text>
+
+      <SegmentedControl
+        value={actionMode}
+        onChange={setActionMode}
+        data={[
+          { label: 'Click', value: 'click' },
+          { label: 'Move Mouse', value: 'move' },
+        ]}
+        fullWidth
+      />
 
       <Paper
         shadow="md"
@@ -138,7 +149,7 @@ export default function InterventionDashboard({ apiBase }) {
               borderRadius: 4,
             }}
           >
-            Last click: ({lastClick.x}, {lastClick.y})
+            Last action: {actionMode} @ ({lastClick.x}, {lastClick.y})
           </Text>
         )}
       </Paper>

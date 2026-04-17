@@ -73,5 +73,5 @@ The dev server will start at `http://localhost:5173`.
 | Method | Endpoint         | Description                                    |
 | ------ | ---------------- | ---------------------------------------------- |
 | GET    | `/api/status`    | Returns the agent status (idle / running / requires_intervention) |
-| POST   | `/api/intervene` | Accepts `{ x, y }` to move & click the mouse   |
+| POST   | `/api/intervene` | Accepts `{ x, y, action }` where action is `click` or `move` |
 | WS     | `/ws/screen`     | Streams base64 PNG screenshots at ~3 FPS        |

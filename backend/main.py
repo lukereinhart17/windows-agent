@@ -58,12 +58,14 @@ class StatusResponse(BaseModel):
 class InterveneRequest(BaseModel):
     x: int
     y: int
+    action: str = "click"
 
 
 class InterveneResponse(BaseModel):
     message: str
     x: int
     y: int
+    action: str
 
 # ---------------------------------------------------------------------------
 # REST endpoints
@@ -82,11 +84,18 @@ async def intervene(payload: InterveneRequest):
     Receive (x, y) coordinates from the frontend and execute a mouse action
     at that position.
     """
-    execute_action(payload.x, payload.y, action="click")
+    action = payload.action.lower()
+    if action not in {"click", "move"}:
+        action = "click"
+
+    execute_action(payload.x, payload.y, action=action)
+
+    message = "Mouse clicked" if action == "click" else "Mouse moved"
     return InterveneResponse(
-        message="Action executed",
+        message=message,
         x=payload.x,
         y=payload.y,
+        action=action,
     )
 
 # ---------------------------------------------------------------------------
@@ -125,6 +134,9 @@ def execute_action(x: int, y: int, action: str = "click") -> None:
     Currently supports a simple left-click. Extend this function to handle
     additional actions (double-click, right-click, typing, etc.) as needed.
     """
+    if action == "move":
+        pyautogui.moveTo(x, y)
+        return
+
     pyautogui.moveTo(x, y)
-    if action == "click":
-        pyautogui.click(x, y)
+    pyautogui.click(x, y)
