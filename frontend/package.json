@@ -13,6 +13,7 @@
     "@emotion/react": "^11.14.0",
     "@mantine/core": "^9.0.2",
     "@mantine/hooks": "^9.0.2",
+    "@rolldown/binding-win32-x64-msvc": "^1.0.0-rc.15",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"
   },
