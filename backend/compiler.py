@@ -1,4 +1,5 @@
 import base64
+import binascii
 import json
 import os
 import re
@@ -9,6 +10,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# Prefer GOOGLE_API_KEY, with GEMINI_API_KEY accepted as a compatibility fallback.
 API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
 MODEL_NAME = "gemini-1.5-flash"
 
@@ -87,7 +89,22 @@ def _extract_coordinates(step: dict[str, Any]) -> dict[str, Any]:
 
 def generate_semantic_sop(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
-    Convert screenshot + coordinate/action steps into semantic SOP JSON using Gemini 1.5 Flash.
+    Convert screenshot + action metadata steps into semantic SOP JSON using Gemini 1.5 Flash.
+
+    Args:
+        steps: Non-empty ordered list of dictionaries. Each dictionary must include
+            a base64 screenshot string in one of: screenshot, screenshot_base64,
+            image, image_base64, frame. Optional action metadata may include action,
+            coordinates, x/y, or raw fields.
+
+    Returns:
+        A list of objects in the shape:
+        [{"step": <int>, "action": <str>, "intent": <str>}]
+
+    Raises:
+        ValueError: If input validation fails, Gemini returns empty/non-array JSON,
+            or screenshot base64 data is invalid.
+        json.JSONDecodeError: If Gemini output is not parseable JSON.
     """
     if not isinstance(steps, list) or not steps:
         raise ValueError("steps must be a non-empty list.")
@@ -109,7 +126,13 @@ def generate_semantic_sop(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
             raise ValueError("Each step must be a dictionary.")
 
         image_b64 = _extract_base64_image(step)
-        image_bytes = base64.b64decode(image_b64, validate=True)
+        try:
+            image_bytes = base64.b64decode(image_b64, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError(
+                f"Invalid base64 screenshot data at step {i}. "
+                "The screenshot payload appears corrupted or malformed."
+            ) from exc
 
         action = _extract_action(step)
         coordinates = _extract_coordinates(step)
@@ -122,7 +145,7 @@ def generate_semantic_sop(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
         parts.append({"mime_type": "image/png", "data": image_bytes})
 
     response = model.generate_content(parts)
-    raw_text = response.text if hasattr(response, "text") else ""
+    raw_text = response.text or ""
     if not raw_text:
         raise ValueError("Gemini returned an empty response.")
 
