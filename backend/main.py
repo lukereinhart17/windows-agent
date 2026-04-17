@@ -44,6 +44,11 @@ if not GEMINI_API_KEY:
 else:
     genai.configure(api_key=GEMINI_API_KEY)
 
+# Pre-instantiate the model once for reuse across requests.
+_gemini_model: genai.GenerativeModel | None = (
+    genai.GenerativeModel("gemini-1.5-flash") if GEMINI_API_KEY else None
+)
+
 # ---------------------------------------------------------------------------
 # Application setup
 # ---------------------------------------------------------------------------
@@ -350,17 +355,24 @@ async def analyze_screen(payload: AnalyzeScreenRequest):
             detail="GEMINI_API_KEY is not configured. Set it in your .env file.",
         )
 
-    # Strip optional data-URI prefix (e.g. "data:image/png;base64,...")
+    # Strip optional data-URI prefix and detect MIME type
     image_data = payload.image
+    mime_type = "image/png"  # default
     if "base64," in image_data:
-        image_data = image_data.split("base64,", 1)[1]
+        header, image_data = image_data.split("base64,", 1)
+        if "image/jpeg" in header or "image/jpg" in header:
+            mime_type = "image/jpeg"
+        elif "image/webp" in header:
+            mime_type = "image/webp"
+        elif "image/gif" in header:
+            mime_type = "image/gif"
 
     image_part = {
-        "mime_type": "image/png",
+        "mime_type": mime_type,
         "data": base64.b64decode(image_data),
     }
 
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    model = _gemini_model
 
     try:
         response = model.generate_content(
