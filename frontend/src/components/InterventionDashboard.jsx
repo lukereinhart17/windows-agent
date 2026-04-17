@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { Paper, Text, Stack, Notification } from '@mantine/core'
 
-const WS_URL = 'ws://localhost:8000/ws/screen'
+const getWsUrl = (apiBase) => {
+  const apiUrl = new URL(apiBase)
+  const wsProtocol = apiUrl.protocol === 'https:' ? 'wss:' : 'ws:'
+  return `${wsProtocol}//${apiUrl.host}/ws/screen`
+}
 
 export default function InterventionDashboard({ apiBase }) {
   const imgRef = useRef(null)
@@ -15,11 +19,18 @@ export default function InterventionDashboard({ apiBase }) {
   useEffect(() => {
     let ws
     let reconnectTimer
+    let isUnmounted = false
+    const wsUrl = getWsUrl(apiBase)
 
     const connect = () => {
-      ws = new WebSocket(WS_URL)
+      if (isUnmounted) return
 
-      ws.onopen = () => setConnected(true)
+      ws = new WebSocket(wsUrl)
+
+      ws.onopen = () => {
+        if (isUnmounted) return
+        setConnected(true)
+      }
 
       ws.onmessage = (event) => {
         if (imgRef.current) {
@@ -28,23 +39,28 @@ export default function InterventionDashboard({ apiBase }) {
       }
 
       ws.onclose = () => {
+        if (isUnmounted) return
         setConnected(false)
         // Attempt to reconnect after 2 seconds
         reconnectTimer = setTimeout(connect, 2000)
       }
 
       ws.onerror = () => {
-        ws.close()
+        // Browser will emit onclose after onerror if the socket fails.
+        // Avoid forcing close while CONNECTING to prevent noisy dev warnings.
       }
     }
 
     connect()
 
     return () => {
+      isUnmounted = true
       clearTimeout(reconnectTimer)
-      if (ws) ws.close()
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.close(1000, 'Component unmounted')
+      }
     }
-  }, [])
+  }, [apiBase])
 
   // -----------------------------------------------------------------------
   // Click handler — capture relative (x, y) and send to backend

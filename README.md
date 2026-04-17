@@ -44,6 +44,16 @@ pip install -r requirements.txt
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
+Windows PowerShell example:
+
+```powershell
+cd backend
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python -m uvicorn main:app --reload --host 127.0.0.1 --port 8000
+```
+
 The API will be available at `http://localhost:8000`.
 
 ### Frontend
@@ -52,6 +62,9 @@ The API will be available at `http://localhost:8000`.
 npm install
 npm run dev
 ```
+
+Optional: set `VITE_API_BASE` in `frontend/.env` if your backend is not running
+on `http://localhost:8000`.
 
 The dev server will start at `http://localhost:5173`.
 

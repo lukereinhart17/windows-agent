@@ -2,7 +2,7 @@ import { AppShell, Title, Badge, Group } from '@mantine/core'
 import { useState, useEffect } from 'react'
 import InterventionDashboard from './components/InterventionDashboard'
 
-const API_BASE = 'http://localhost:8000'
+const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
 
 function App() {
   const [agentStatus, setAgentStatus] = useState('idle')
