@@ -10,8 +10,12 @@ Provides:
 
 import asyncio
 import base64
+import json
+import os
 from enum import Enum
 
+import google.generativeai as genai
+from dotenv import load_dotenv
 from fastapi import BackgroundTasks, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -25,6 +29,27 @@ import mss.tools
 import pyautogui
 
 # ---------------------------------------------------------------------------
+# Environment & Gemini configuration
+# ---------------------------------------------------------------------------
+
+load_dotenv()
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    import warnings
+    warnings.warn(
+        "GEMINI_API_KEY is not set. The /api/analyze-screen endpoint will not work.",
+        stacklevel=2,
+    )
+else:
+    genai.configure(api_key=GEMINI_API_KEY)
+
+# Pre-instantiate the model once for reuse across requests.
+_gemini_model: genai.GenerativeModel | None = (
+    genai.GenerativeModel("gemini-1.5-flash") if GEMINI_API_KEY else None
+)
+
+# ---------------------------------------------------------------------------
 # Application setup
 # ---------------------------------------------------------------------------
 
@@ -32,7 +57,7 @@ app = FastAPI(title="Windows Agent Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],  # Vite dev server
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -141,6 +166,11 @@ class RecordActionResponse(BaseModel):
 class ScreenshotResponse(BaseModel):
     screenshot: str  # base64 PNG
     monitor_index: int
+
+
+class AnalyzeScreenRequest(BaseModel):
+    image: str  # base64 encoded image string
+    prompt: str
 
 
 # ---------------------------------------------------------------------------
@@ -311,6 +341,60 @@ async def get_screenshot():
     global selected_monitor_index
     b64 = _capture_monitor_b64(selected_monitor_index)
     return ScreenshotResponse(screenshot=b64, monitor_index=selected_monitor_index)
+
+
+@app.post("/api/analyze-screen")
+async def analyze_screen(payload: AnalyzeScreenRequest):
+    """
+    Accept a base64 encoded image and a text prompt, send them to the
+    Gemini 1.5 Flash model, and return the model's structured JSON response.
+    """
+    if not GEMINI_API_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="GEMINI_API_KEY is not configured. Set it in your .env file.",
+        )
+
+    # Strip optional data-URI prefix and detect MIME type
+    image_data = payload.image
+    mime_type = "image/png"  # default
+    if "base64," in image_data:
+        header, image_data = image_data.split("base64,", 1)
+        if "image/jpeg" in header or "image/jpg" in header:
+            mime_type = "image/jpeg"
+        elif "image/webp" in header:
+            mime_type = "image/webp"
+        elif "image/gif" in header:
+            mime_type = "image/gif"
+
+    image_part = {
+        "mime_type": mime_type,
+        "data": base64.b64decode(image_data),
+    }
+
+    model = _gemini_model
+
+    try:
+        response = model.generate_content(
+            [payload.prompt, image_part],
+            generation_config={"response_mime_type": "application/json"},
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Gemini API error: {exc}") from exc
+
+    raw_text = (response.text or "").strip()
+    if not raw_text:
+        raise HTTPException(status_code=502, detail="Gemini returned an empty response.")
+
+    try:
+        result = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Gemini returned invalid JSON: {raw_text}",
+        ) from exc
+
+    return result
 
 
 @app.post("/api/record-action", response_model=RecordActionResponse)
