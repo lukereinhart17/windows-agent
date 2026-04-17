@@ -49,7 +49,6 @@ The API will be available at `http://localhost:8000`.
 ### Frontend
 
 ```bash
-cd frontend
 npm install
 npm run dev
 ```
