@@ -73,5 +73,8 @@ The dev server will start at `http://localhost:5173`.
 | Method | Endpoint         | Description                                    |
 | ------ | ---------------- | ---------------------------------------------- |
 | GET    | `/api/status`    | Returns the agent status (idle / running / requires_intervention) |
-| POST   | `/api/intervene` | Accepts `{ x, y, action }` where action is `click` or `move` |
+| GET    | `/api/monitors`  | Lists available screens and current active screen |
+| POST   | `/api/monitor`   | Sets the active screen using `{ monitor_index }` |
+| POST   | `/api/intervene` | Accepts `{ x, y, action, monitor_index? }` where action is `click` or `move` |
+| POST   | `/api/execute/{task_name}` | Runs autonomous execution using the active screen |
 | WS     | `/ws/screen`     | Streams base64 PNG screenshots at ~3 FPS        |

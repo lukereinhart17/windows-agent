@@ -6,21 +6,40 @@ const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000'
 
 function App() {
   const [agentStatus, setAgentStatus] = useState('idle')
+  const [isBackendReachable, setIsBackendReachable] = useState(false)
 
   useEffect(() => {
+    let isUnmounted = false
+    let timer
+    let retryDelayMs = 3000
+
     const fetchStatus = async () => {
       try {
         const res = await fetch(`${API_BASE}/api/status`)
+        if (!res.ok) throw new Error('Status request failed')
         const data = await res.json()
+        if (isUnmounted) return
         setAgentStatus(data.status)
+        setIsBackendReachable(true)
+        retryDelayMs = 3000
       } catch {
+        if (isUnmounted) return
         setAgentStatus('disconnected')
+        setIsBackendReachable(false)
+        retryDelayMs = Math.min(retryDelayMs * 2, 30000)
+      } finally {
+        if (!isUnmounted) {
+          timer = setTimeout(fetchStatus, retryDelayMs)
+        }
       }
     }
 
     fetchStatus()
-    const interval = setInterval(fetchStatus, 3000)
-    return () => clearInterval(interval)
+
+    return () => {
+      isUnmounted = true
+      clearTimeout(timer)
+    }
   }, [])
 
   const statusColor =
@@ -50,7 +69,10 @@ function App() {
       </AppShell.Header>
 
       <AppShell.Main>
-        <InterventionDashboard apiBase={API_BASE} />
+        <InterventionDashboard
+          apiBase={API_BASE}
+          isBackendReachable={isBackendReachable}
+        />
       </AppShell.Main>
     </AppShell>
   )
