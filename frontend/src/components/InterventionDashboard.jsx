@@ -4,7 +4,9 @@ import ChatPanel from './ChatPanel'
 import RecordTaskPanel from './RecordTaskPanel'
 
 const getWsUrl = (apiBase) => {
-  const apiUrl = new URL(apiBase)
+  const apiUrl = apiBase
+    ? new URL(apiBase, window.location.origin)
+    : new URL(window.location.origin)
   const wsProtocol = apiUrl.protocol === 'https:' ? 'wss:' : 'ws:'
   return `${wsProtocol}//${apiUrl.host}/ws/screen`
 }

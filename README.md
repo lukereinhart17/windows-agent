@@ -63,8 +63,16 @@ npm install
 npm run dev
 ```
 
+From the repository root, `npm run dev` now starts both:
+- backend on `127.0.0.1:8000`
+- frontend on `localhost:5173`
+
 Optional: set `VITE_API_BASE` in `frontend/.env` if your backend is not running
 on `http://localhost:8000`.
+
+By default in development, the frontend proxies `/api` and `/ws` to
+`http://127.0.0.1:8000` via Vite, so you can keep `VITE_API_BASE` unset for
+local runs.
 
 The dev server will start at `http://localhost:5173`.
 
