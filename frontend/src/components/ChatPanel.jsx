@@ -13,7 +13,7 @@ import {
 } from '@mantine/core'
 import { IconSend, IconTrash, IconPhoto } from '@tabler/icons-react'
 
-export default function ChatPanel({ apiBase, isBackendReachable }) {
+export default function ChatPanel({ apiBase, isBackendReachable, promptMonitor }) {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
@@ -61,16 +61,32 @@ export default function ChatPanel({ apiBase, isBackendReachable }) {
       const res = await fetch(`${apiBase}/api/prompt`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: trimmed }),
+        body: JSON.stringify({
+          message: trimmed,
+          monitor_index: Number(promptMonitor || 1),
+        }),
       })
 
       if (!res.ok) throw new Error('Prompt failed')
 
       const data = await res.json()
-      setMessages((prev) => [
-        ...prev,
-        { role: 'assistant', content: data.reply, screenshot: null },
-      ])
+      setMessages((prev) => {
+        const next = [
+          ...prev,
+          { role: 'assistant', content: data.reply, screenshot: null },
+        ]
+
+        if (data.debug?.latency_ms) {
+          const latency = data.debug.latency_ms
+          next.push({
+            role: 'assistant',
+            content: `Pipeline debug: ${JSON.stringify(latency)}`,
+            screenshot: null,
+          })
+        }
+
+        return next
+      })
     } catch {
       setMessages((prev) => [
         ...prev,
@@ -79,7 +95,7 @@ export default function ChatPanel({ apiBase, isBackendReachable }) {
     } finally {
       setSending(false)
     }
-  }, [input, sending, apiBase, isBackendReachable])
+  }, [input, sending, apiBase, isBackendReachable, promptMonitor])
 
   const handleKeyDown = (e) => {
     if (e.key === 'Enter' && !e.shiftKey) {

@@ -3,16 +3,27 @@ import binascii
 import json
 import os
 import re
+from pathlib import Path
 from typing import Any
 
 import google.generativeai as genai
 from dotenv import load_dotenv
 
-load_dotenv()
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+ENV_PATHS = (
+    PROJECT_ROOT / ".env",
+    PROJECT_ROOT / ".env.local",
+    PROJECT_ROOT / "frontend" / ".env",
+    PROJECT_ROOT / "frontend" / ".env.local",
+)
+
+for env_path in ENV_PATHS:
+    if env_path.exists():
+        load_dotenv(env_path, override=False)
 
 # Prefer GOOGLE_API_KEY, with GEMINI_API_KEY accepted as a compatibility fallback.
 API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-MODEL_NAME = "gemini-1.5-flash"
+MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 if not API_KEY:
     raise ValueError("Missing Gemini API key. Set GOOGLE_API_KEY or GEMINI_API_KEY in .env.")

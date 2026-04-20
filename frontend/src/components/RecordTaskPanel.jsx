@@ -13,9 +13,15 @@ import {
 } from '@mantine/core'
 import { IconPlayerRecord, IconPlayerStop, IconTrash } from '@tabler/icons-react'
 
-export default function RecordTaskPanel({ apiBase, isBackendReachable, monitors, selectedMonitor }) {
+export default function RecordTaskPanel({
+  apiBase,
+  isBackendReachable,
+  monitors,
+  selectedMonitor,
+  recordMonitor,
+  onRecordMonitorChange,
+}) {
   const [isRecording, setIsRecording] = useState(false)
-  const [recordMonitor, setRecordMonitor] = useState(selectedMonitor)
   const [recordedSteps, setRecordedSteps] = useState([])
   const [feedback, setFeedback] = useState(null)
   const imgRef = useRef(null)
@@ -24,10 +30,10 @@ export default function RecordTaskPanel({ apiBase, isBackendReachable, monitors,
 
   // Sync monitor selection when parent changes
   useEffect(() => {
-    if (!isRecording) {
-      setRecordMonitor(selectedMonitor)
+    if (!isRecording && !recordMonitor) {
+      onRecordMonitorChange?.(selectedMonitor)
     }
-  }, [selectedMonitor, isRecording])
+  }, [selectedMonitor, isRecording, recordMonitor, onRecordMonitorChange])
 
   // Start/stop recording WebSocket feed on the recording monitor
   useEffect(() => {
@@ -158,7 +164,7 @@ export default function RecordTaskPanel({ apiBase, isBackendReachable, monitors,
           label="Screen to record"
           value={recordMonitor}
           data={monitors}
-          onChange={setRecordMonitor}
+          onChange={onRecordMonitorChange}
           placeholder="Select screen"
           size="xs"
         />

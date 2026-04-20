@@ -3,6 +3,20 @@ import { Paper, Text, Stack, Notification, SegmentedControl, Select, Grid, Divid
 import ChatPanel from './ChatPanel'
 import RecordTaskPanel from './RecordTaskPanel'
 
+const MODEL_CAPABILITIES = {
+  gemini: 'Planning + UI reasoning',
+  yolo: 'Real-time detection',
+  'faster-rcnn': 'High-accuracy detection',
+  'mobilenet-shufflenet': 'Fast classification (edge/low-latency)',
+  'resnet-efficientnet': 'High-accuracy classification',
+  cnnparted: 'Partitioned CNN experiments',
+}
+
+const modelLabel = (name) => {
+  const note = MODEL_CAPABILITIES[name] || 'General vision model'
+  return `${name} - ${note}`
+}
+
 const getWsUrl = (apiBase) => {
   const apiUrl = apiBase
     ? new URL(apiBase, window.location.origin)
@@ -16,9 +30,16 @@ export default function InterventionDashboard({ apiBase, isBackendReachable }) {
   const [connected, setConnected] = useState(false)
   const [monitors, setMonitors] = useState([])
   const [selectedMonitor, setSelectedMonitor] = useState('1')
+  const [recordMonitor, setRecordMonitor] = useState('1')
   const [actionMode, setActionMode] = useState('click')
   const [lastClick, setLastClick] = useState(null)
   const [feedback, setFeedback] = useState(null)
+  const [availableModels, setAvailableModels] = useState([])
+  const [activeModel, setActiveModel] = useState(null)
+  const [pipelineMode, setPipelineMode] = useState('single')
+  const [detectorModel, setDetectorModel] = useState('yolo')
+  const [classifierModel, setClassifierModel] = useState('mobilenet-shufflenet')
+  const [plannerModel, setPlannerModel] = useState('gemini')
 
   useEffect(() => {
     if (!isBackendReachable) {
@@ -41,7 +62,9 @@ export default function InterventionDashboard({ apiBase, isBackendReachable }) {
         }))
 
         setMonitors(options)
-        setSelectedMonitor(String(data.selected_monitor_index || 1))
+        const initialMonitor = String(data.selected_monitor_index || 1)
+        setSelectedMonitor(initialMonitor)
+        setRecordMonitor(initialMonitor)
       } catch {
         setFeedback({ type: 'error', message: 'Failed to load screen list' })
       }
@@ -49,6 +72,78 @@ export default function InterventionDashboard({ apiBase, isBackendReachable }) {
 
     fetchMonitors()
   }, [apiBase, isBackendReachable])
+
+  // Fetch available vision models
+  useEffect(() => {
+    if (!isBackendReachable) {
+      setAvailableModels([])
+      setActiveModel(null)
+      return
+    }
+
+    const fetchModels = async () => {
+      try {
+        const res = await fetch(`${apiBase}/api/models`)
+        if (!res.ok) return
+        const data = await res.json()
+        const models = (data.models || []).map((m) => ({
+          value: m.name,
+          label: modelLabel(m.name),
+        }))
+        setAvailableModels(models)
+        const active = (data.models || []).find((m) => m.active)
+        setActiveModel(active ? active.name : null)
+      } catch {
+        // silently ignore
+      }
+    }
+
+    fetchModels()
+  }, [apiBase, isBackendReachable])
+
+  useEffect(() => {
+    if (!isBackendReachable) return
+
+    const fetchPipeline = async () => {
+      try {
+        const res = await fetch(`${apiBase}/api/pipeline`)
+        if (!res.ok) return
+        const data = await res.json()
+        const pipeline = data.pipeline || {}
+        setPipelineMode(pipeline.mode || 'single')
+        setDetectorModel(pipeline.detector_model || 'yolo')
+        setClassifierModel(pipeline.classifier_model || 'mobilenet-shufflenet')
+        setPlannerModel(pipeline.planner_model || 'gemini')
+      } catch {
+        // ignore
+      }
+    }
+
+    fetchPipeline()
+  }, [apiBase, isBackendReachable])
+
+  const handleModelChange = useCallback(
+    async (value) => {
+      if (!value) return
+      setActiveModel(value)
+
+      try {
+        const res = await fetch(`${apiBase}/api/models/set`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: value }),
+        })
+
+        if (!res.ok) throw new Error('Model switch failed')
+        setFeedback({ type: 'success', message: `Model switched to ${value}` })
+      } catch {
+        setFeedback({ type: 'error', message: 'Failed to switch model' })
+      }
+
+      setTimeout(() => setFeedback(null), 3000)
+    },
+    [apiBase],
+  )
 
   const handleMonitorChange = useCallback(
     async (value) => {
@@ -70,6 +165,31 @@ export default function InterventionDashboard({ apiBase, isBackendReachable }) {
         setFeedback({ type: 'success', message: `Viewing screen ${value}` })
       } catch {
         setFeedback({ type: 'error', message: 'Failed to change screen' })
+      }
+
+      setTimeout(() => setFeedback(null), 3000)
+    },
+    [apiBase],
+  )
+
+  const updatePipeline = useCallback(
+    async ({ mode, detector, classifier, planner }) => {
+      try {
+        const res = await fetch(`${apiBase}/api/pipeline`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            mode,
+            detector_model: detector,
+            classifier_model: classifier,
+            planner_model: planner,
+          }),
+        })
+
+        if (!res.ok) throw new Error('Pipeline update failed')
+        setFeedback({ type: 'success', message: `Pipeline updated (${mode})` })
+      } catch {
+        setFeedback({ type: 'error', message: 'Failed to update pipeline' })
       }
 
       setTimeout(() => setFeedback(null), 3000)
@@ -195,6 +315,87 @@ export default function InterventionDashboard({ apiBase, isBackendReachable }) {
             placeholder="Select screen"
           />
 
+          <Select
+            label="Vision Model"
+            value={activeModel}
+            data={availableModels}
+            onChange={handleModelChange}
+            placeholder="Select model"
+          />
+
+          <SegmentedControl
+            value={pipelineMode}
+            onChange={(value) => {
+              setPipelineMode(value)
+              updatePipeline({
+                mode: value,
+                detector: detectorModel,
+                classifier: classifierModel,
+                planner: plannerModel,
+              })
+            }}
+            data={[
+              { label: 'Single Model', value: 'single' },
+              { label: 'Cascade', value: 'cascade' },
+            ]}
+            fullWidth
+          />
+
+          {pipelineMode === 'cascade' && (
+            <>
+              <Select
+                label="Detector"
+                value={detectorModel}
+                data={availableModels}
+                onChange={(value) => {
+                  if (!value) return
+                  setDetectorModel(value)
+                  updatePipeline({
+                    mode: pipelineMode,
+                    detector: value,
+                    classifier: classifierModel,
+                    planner: plannerModel,
+                  })
+                }}
+                placeholder="Select detector model"
+              />
+
+              <Select
+                label="Classifier"
+                value={classifierModel}
+                data={availableModels}
+                onChange={(value) => {
+                  if (!value) return
+                  setClassifierModel(value)
+                  updatePipeline({
+                    mode: pipelineMode,
+                    detector: detectorModel,
+                    classifier: value,
+                    planner: plannerModel,
+                  })
+                }}
+                placeholder="Select classifier model"
+              />
+
+              <Select
+                label="Planner"
+                value={plannerModel}
+                data={availableModels}
+                onChange={(value) => {
+                  if (!value) return
+                  setPlannerModel(value)
+                  updatePipeline({
+                    mode: pipelineMode,
+                    detector: detectorModel,
+                    classifier: classifierModel,
+                    planner: value,
+                  })
+                }}
+                placeholder="Select planner model"
+              />
+            </>
+          )}
+
           <SegmentedControl
             value={actionMode}
             onChange={setActionMode}
@@ -255,7 +456,11 @@ export default function InterventionDashboard({ apiBase, isBackendReachable }) {
 
       <Grid.Col span={{ base: 12, md: 4 }}>
         <Stack gap="md">
-          <ChatPanel apiBase={apiBase} isBackendReachable={isBackendReachable} />
+          <ChatPanel
+            apiBase={apiBase}
+            isBackendReachable={isBackendReachable}
+            promptMonitor={recordMonitor || selectedMonitor}
+          />
 
           <Divider />
 
@@ -264,6 +469,8 @@ export default function InterventionDashboard({ apiBase, isBackendReachable }) {
             isBackendReachable={isBackendReachable}
             monitors={monitors}
             selectedMonitor={selectedMonitor}
+            recordMonitor={recordMonitor}
+            onRecordMonitorChange={(value) => setRecordMonitor(value || selectedMonitor || '1')}
           />
         </Stack>
       </Grid.Col>

@@ -76,6 +76,18 @@ local runs.
 
 The dev server will start at `http://localhost:5173`.
 
+### Prompt-Driven Actions
+
+The chat prompt endpoint (`POST /api/prompt`) can now execute actions:
+- Direct commands without a model:
+    - `click 500 320`
+    - `move 200 100`
+- Natural-language prompts with Gemini planning when `GOOGLE_API_KEY` or
+    `GEMINI_API_KEY` is set.
+
+If no API key is configured, prompt execution falls back to direct coordinate
+commands only.
+
 ## API Reference
 
 | Method | Endpoint         | Description                                    |

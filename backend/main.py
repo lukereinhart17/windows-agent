@@ -10,9 +10,12 @@ Provides:
 
 import asyncio
 import base64
+import ctypes
 import json
 import os
+import re
 from enum import Enum
+from pathlib import Path
 
 import google.generativeai as genai
 from dotenv import load_dotenv
@@ -24,6 +27,29 @@ try:
     from .executor import execute_task
 except ImportError:
     from executor import execute_task
+
+try:
+    from .models import get_active_model, get_model, set_active_model, list_models
+    from .models.registry import model_registry as _reg
+except ImportError:
+    from models import get_active_model, get_model, set_active_model, list_models
+    from models.registry import model_registry as _reg
+
+try:
+    from .pipeline import (
+        PipelineConfig,
+        config_to_dict,
+        detect_step_with_pipeline,
+        plan_action_with_pipeline,
+    )
+except ImportError:
+    from pipeline import (
+        PipelineConfig,
+        config_to_dict,
+        detect_step_with_pipeline,
+        plan_action_with_pipeline,
+    )
+
 import mss
 import mss.tools
 import pyautogui
@@ -32,9 +58,25 @@ import pyautogui
 # Environment & Gemini configuration
 # ---------------------------------------------------------------------------
 
-load_dotenv()
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+ENV_PATHS = (
+    PROJECT_ROOT / ".env",
+    PROJECT_ROOT / ".env.local",
+    PROJECT_ROOT / "frontend" / ".env",
+    PROJECT_ROOT / "frontend" / ".env.local",
+)
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+for env_path in ENV_PATHS:
+    if env_path.exists():
+        load_dotenv(env_path, override=False)
+
+GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+FALLBACK_MODELS = (
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
+)
 if not GEMINI_API_KEY:
     import warnings
     warnings.warn(
@@ -44,10 +86,75 @@ if not GEMINI_API_KEY:
 else:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# Pre-instantiate the model once for reuse across requests.
-_gemini_model: genai.GenerativeModel | None = (
-    genai.GenerativeModel("gemini-1.5-flash") if GEMINI_API_KEY else None
-)
+# ---------------------------------------------------------------------------
+# Register all vision model adapters (lazy imports — each adapter only
+# pulls in heavy deps like torch/ultralytics when actually instantiated).
+# ---------------------------------------------------------------------------
+
+def _register_all_models() -> None:
+    """Import every adapter module so it registers itself with the registry."""
+    import importlib
+    adapter_modules = [
+        "models.gemini_model",
+        "models.faster_rcnn",
+        "models.resnet_efficientnet",
+        "models.mobilenet_shufflenet",
+        "models.yolo_model",
+        "models.cnnparted_model",
+    ]
+    for mod_name in adapter_modules:
+        try:
+            importlib.import_module(f".{mod_name}" if __package__ else mod_name, __package__)
+        except Exception:
+            pass  # adapter stays unregistered if deps are missing
+
+_register_all_models()
+
+# Default to gemini if API key is available
+if GEMINI_API_KEY:
+    try:
+        set_active_model("gemini")
+    except KeyError:
+        pass
+
+def _model_candidates() -> list[str]:
+    ordered = [GEMINI_MODEL, *FALLBACK_MODELS]
+    seen: set[str] = set()
+    unique: list[str] = []
+    for name in ordered:
+        normalized = name.strip()
+        if normalized and normalized not in seen:
+            unique.append(normalized)
+            seen.add(normalized)
+    return unique
+
+
+def _is_model_unavailable_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return (
+        "model" in msg
+        and (
+            "not found" in msg
+            or "no longer available" in msg
+            or "not supported" in msg
+        )
+    )
+
+
+def _generate_content_with_fallback(contents, generation_config=None):
+    last_exc: Exception | None = None
+    for model_name in _model_candidates():
+        try:
+            model = genai.GenerativeModel(model_name)
+            return model.generate_content(contents, generation_config=generation_config)
+        except Exception as exc:
+            last_exc = exc
+            if _is_model_unavailable_error(exc):
+                continue
+            raise
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("No Gemini models configured.")
 
 # ---------------------------------------------------------------------------
 # Application setup
@@ -137,10 +244,12 @@ class ChatMessage(BaseModel):
 
 class PromptRequest(BaseModel):
     message: str
+    monitor_index: int | None = None
 
 
 class PromptResponse(BaseModel):
     reply: str
+    debug: dict | None = None
 
 
 class RecordedAction(BaseModel):
@@ -173,12 +282,97 @@ class AnalyzeScreenRequest(BaseModel):
     prompt: str
 
 
+class CalibrationOffset(BaseModel):
+    monitor_index: int
+    offset_x: int
+    offset_y: int
+
+
+class CalibrationComputeRequest(BaseModel):
+    monitor_index: int
+    target_x: int
+    target_y: int
+    actual_x: int
+    actual_y: int
+
+
+class CalibrationListResponse(BaseModel):
+    selected_monitor_index: int
+    offsets: list[CalibrationOffset]
+
+
+class SetModelRequest(BaseModel):
+    name: str
+
+
+class PipelineConfigRequest(BaseModel):
+    mode: str
+    detector_model: str | None = None
+    classifier_model: str | None = None
+    planner_model: str | None = None
+    verify_before_click: bool | None = None
+    verification_threshold: float | None = None
+    fallback_single_on_low_confidence: bool | None = None
+    verifier_model: str | None = None
+
+
 # ---------------------------------------------------------------------------
 # Chat context (in-memory)
 # ---------------------------------------------------------------------------
 
 chat_history: list[dict] = []
 recorded_actions: list[dict] = []
+pipeline_config = PipelineConfig()
+
+
+def _enable_windows_dpi_awareness() -> None:
+    """Enable DPI awareness so screenshot and cursor coordinates use the same pixel space."""
+    if os.name != "nt":
+        return
+
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+
+def _load_initial_offsets() -> dict[int, tuple[int, int]]:
+    """Load optional per-monitor offsets from JSON in CLICK_OFFSETS_JSON."""
+    raw = os.getenv("CLICK_OFFSETS_JSON", "").strip()
+    if not raw:
+        return {}
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+
+    if not isinstance(payload, dict):
+        return {}
+
+    parsed: dict[int, tuple[int, int]] = {}
+    for key, value in payload.items():
+        try:
+            monitor_index = int(key)
+            if isinstance(value, dict):
+                offset_x = int(value.get("x", 0))
+                offset_y = int(value.get("y", 0))
+            elif isinstance(value, list) and len(value) >= 2:
+                offset_x = int(value[0])
+                offset_y = int(value[1])
+            else:
+                continue
+            parsed[monitor_index] = (offset_x, offset_y)
+        except (TypeError, ValueError):
+            continue
+
+    return parsed
+
+
+_enable_windows_dpi_awareness()
 
 # ---------------------------------------------------------------------------
 # REST endpoints
@@ -219,6 +413,7 @@ async def intervene(payload: InterveneRequest):
 
 is_execution_running = False
 selected_monitor_index = 1
+monitor_offsets: dict[int, tuple[int, int]] = _load_initial_offsets()
 
 
 def _available_monitors() -> list[MonitorInfo]:
@@ -275,6 +470,18 @@ def _monitor_bounds(monitor_index: int) -> MonitorInfo:
     )
 
 
+def _get_monitor_offset(monitor_index: int) -> tuple[int, int]:
+    resolved = _resolve_monitor_index(monitor_index)
+    return monitor_offsets.get(resolved, (0, 0))
+
+
+def _set_monitor_offset(monitor_index: int, offset_x: int, offset_y: int) -> CalibrationOffset:
+    resolved = _resolve_monitor_index(monitor_index)
+    monitor_offsets[resolved] = (int(offset_x), int(offset_y))
+    x, y = monitor_offsets[resolved]
+    return CalibrationOffset(monitor_index=resolved, offset_x=x, offset_y=y)
+
+
 @app.get("/api/monitors", response_model=MonitorListResponse)
 async def get_monitors():
     """List detected monitors and current active monitor index."""
@@ -297,6 +504,46 @@ async def set_monitor(payload: SetMonitorRequest):
     )
 
 
+@app.get("/api/calibration", response_model=CalibrationListResponse)
+async def get_calibration():
+    """Return all active per-monitor coordinate offsets."""
+    global selected_monitor_index
+    selected_monitor_index = _resolve_monitor_index(selected_monitor_index)
+
+    offsets = [
+        CalibrationOffset(monitor_index=idx, offset_x=x, offset_y=y)
+        for idx, (x, y) in sorted(monitor_offsets.items())
+    ]
+
+    return CalibrationListResponse(
+        selected_monitor_index=selected_monitor_index,
+        offsets=offsets,
+    )
+
+
+@app.post("/api/calibration", response_model=CalibrationOffset)
+async def set_calibration(payload: CalibrationOffset):
+    """Set absolute per-monitor pixel offset correction."""
+    return _set_monitor_offset(payload.monitor_index, payload.offset_x, payload.offset_y)
+
+
+@app.post("/api/calibration/compute", response_model=CalibrationOffset)
+async def compute_calibration(payload: CalibrationComputeRequest):
+    """Compute and apply offset from expected target vs actual click location."""
+    delta_x = int(payload.target_x - payload.actual_x)
+    delta_y = int(payload.target_y - payload.actual_y)
+    current_x, current_y = _get_monitor_offset(payload.monitor_index)
+    return _set_monitor_offset(payload.monitor_index, current_x + delta_x, current_y + delta_y)
+
+
+@app.delete("/api/calibration/{monitor_index}", response_model=CalibrationOffset)
+async def clear_calibration(monitor_index: int):
+    """Clear per-monitor offset correction and return the cleared value."""
+    resolved = _resolve_monitor_index(monitor_index)
+    monitor_offsets.pop(resolved, None)
+    return CalibrationOffset(monitor_index=resolved, offset_x=0, offset_y=0)
+
+
 # ---------------------------------------------------------------------------
 # Prompt / Chat endpoints
 # ---------------------------------------------------------------------------
@@ -311,14 +558,104 @@ def _capture_monitor_b64(monitor_index: int) -> str:
         return base64.b64encode(png_bytes).decode("utf-8")
 
 
+def _parse_direct_action(message: str) -> tuple[str, int, int] | None:
+    """Parse direct commands like 'click 120 340' or 'move to 120, 340'."""
+    pattern = re.compile(
+        r"^\s*(click|move)\s*(?:to|at)?\s*(\d+)\s*[,\s]\s*(\d+)\s*$",
+        re.IGNORECASE,
+    )
+    match = pattern.match(message)
+    if not match:
+        return None
+
+    action = match.group(1).lower()
+    x = int(match.group(2))
+    y = int(match.group(3))
+    return action, x, y
+
+
+def _plan_action_from_prompt(message: str, monitor_index: int) -> dict:
+    """Use configured pipeline to plan a single UI action."""
+    if pipeline_config.mode == "single" and get_active_model() is None:
+        raise ValueError(
+            "No active model selected. "
+            "Select one via POST /api/models/set or switch pipeline mode to cascade."
+        )
+
+    monitor = _monitor_bounds(monitor_index)
+    screenshot_b64 = _capture_monitor_b64(monitor_index)
+    screenshot_png = base64.b64decode(screenshot_b64)
+
+    bounds = {
+        "left": monitor.left,
+        "top": monitor.top,
+        "width": monitor.width,
+        "height": monitor.height,
+    }
+
+    result = plan_action_with_pipeline(screenshot_png, message, bounds, pipeline_config)
+    plan = result.plan
+
+    x = max(0, min(int(plan.get("x", 0)), monitor.width - 1))
+    y = max(0, min(int(plan.get("y", 0)), monitor.height - 1))
+    action = str(plan.get("action", "click")).lower()
+    if action not in {"click", "move"}:
+        action = "click"
+
+    return {
+        "action": action,
+        "x": x,
+        "y": y,
+        "reason": str(plan.get("reason", "")).strip(),
+        "debug": result.debug,
+    }
+
+
 @app.post("/api/prompt", response_model=PromptResponse)
 async def send_prompt(payload: PromptRequest):
-    """Accept a user prompt and store it in chat history."""
+    """Accept a user prompt, plan an action, and execute it when possible."""
+    global selected_monitor_index
+    debug = None
+
     chat_history.append({"role": "user", "content": payload.message, "screenshot": None})
-    # Placeholder reply — replace with Gemini integration when ready
-    reply = f"Received: {payload.message}"
+
+    prompt_monitor_index = _resolve_monitor_index(
+        payload.monitor_index if payload.monitor_index is not None else selected_monitor_index
+    )
+
+    try:
+        direct_action = _parse_direct_action(payload.message)
+        if direct_action is not None:
+            action, x, y = direct_action
+            execute_action(x, y, action=action, monitor_index=prompt_monitor_index)
+            reply = f"Executed {action} at ({x}, {y}) on display {prompt_monitor_index}."
+        elif get_active_model() is not None or pipeline_config.mode == "cascade":
+            plan = _plan_action_from_prompt(payload.message, prompt_monitor_index)
+            execute_action(
+                plan["x"],
+                plan["y"],
+                action=plan["action"],
+                monitor_index=prompt_monitor_index,
+            )
+            active_name = get_active_model().name if get_active_model() else pipeline_config.planner_model
+            reply = (
+                f"[{active_name}] Executed {plan['action']} at ({plan['x']}, {plan['y']}) "
+                f"on display {prompt_monitor_index}. {plan['reason']}"
+            )
+            debug = plan.get("debug")
+        else:
+            reply = (
+                "Prompt received, but no vision model is active. "
+                "Select a model via the Model selector or set GOOGLE_API_KEY for Gemini. "
+                "Direct commands like 'click 500 320' / 'move 200 100' still work."
+            )
+            debug = None
+    except Exception as exc:
+        reply = f"Failed to execute prompt: {exc}"
+        debug = None
+
     chat_history.append({"role": "assistant", "content": reply, "screenshot": None})
-    return PromptResponse(reply=reply)
+    return PromptResponse(reply=reply, debug=debug)
 
 
 @app.get("/api/chat")
@@ -343,58 +680,105 @@ async def get_screenshot():
     return ScreenshotResponse(screenshot=b64, monitor_index=selected_monitor_index)
 
 
+@app.get("/api/models")
+async def get_models():
+    """List all registered vision models and which is active."""
+    return {"models": list_models()}
+
+
+@app.post("/api/models/set")
+async def set_model_endpoint(payload: SetModelRequest):
+    """Switch the active vision model by name."""
+    try:
+        model = set_active_model(payload.name)
+    except KeyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"message": f"Active model set to '{model.name}'", "active": model.name}
+
+
+@app.get("/api/pipeline")
+async def get_pipeline_config():
+    """Return current action pipeline config."""
+    return {"pipeline": config_to_dict(pipeline_config)}
+
+
+@app.post("/api/pipeline")
+async def set_pipeline_config(payload: PipelineConfigRequest):
+    """Configure action pipeline mode and participating models."""
+    mode = payload.mode.lower().strip()
+    if mode not in {"single", "cascade"}:
+        raise HTTPException(status_code=400, detail="mode must be 'single' or 'cascade'.")
+
+    # Validate configured models exist before saving.
+    if payload.detector_model:
+        try:
+            get_model(payload.detector_model)
+        except KeyError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if payload.classifier_model:
+        try:
+            get_model(payload.classifier_model)
+        except KeyError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if payload.planner_model:
+        try:
+            get_model(payload.planner_model)
+        except KeyError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if payload.verifier_model:
+        try:
+            get_model(payload.verifier_model)
+        except KeyError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if payload.verification_threshold is not None:
+        if payload.verification_threshold < 0.0 or payload.verification_threshold > 1.0:
+            raise HTTPException(status_code=400, detail="verification_threshold must be between 0.0 and 1.0")
+
+    pipeline_config.mode = mode
+    if payload.detector_model:
+        pipeline_config.detector_model = payload.detector_model
+    if payload.classifier_model:
+        pipeline_config.classifier_model = payload.classifier_model
+    if payload.planner_model:
+        pipeline_config.planner_model = payload.planner_model
+    if payload.verify_before_click is not None:
+        pipeline_config.verify_before_click = payload.verify_before_click
+    if payload.verification_threshold is not None:
+        pipeline_config.verification_threshold = float(payload.verification_threshold)
+    if payload.fallback_single_on_low_confidence is not None:
+        pipeline_config.fallback_single_on_low_confidence = payload.fallback_single_on_low_confidence
+    if payload.verifier_model:
+        pipeline_config.verifier_model = payload.verifier_model
+
+    return {"message": "Pipeline updated", "pipeline": config_to_dict(pipeline_config)}
+
+
 @app.post("/api/analyze-screen")
 async def analyze_screen(payload: AnalyzeScreenRequest):
     """
     Accept a base64 encoded image and a text prompt, send them to the
-    Gemini 1.5 Flash model, and return the model's structured JSON response.
+    active vision model, and return the model's structured JSON response.
     """
-    if not GEMINI_API_KEY:
+    if pipeline_config.mode == "single" and get_active_model() is None:
         raise HTTPException(
             status_code=500,
-            detail="GEMINI_API_KEY is not configured. Set it in your .env file.",
+            detail="No vision model is active. Select one via POST /api/models/set.",
         )
 
-    # Strip optional data-URI prefix and detect MIME type
+    # Strip optional data-URI prefix
     image_data = payload.image
-    mime_type = "image/png"  # default
     if "base64," in image_data:
-        header, image_data = image_data.split("base64,", 1)
-        if "image/jpeg" in header or "image/jpg" in header:
-            mime_type = "image/jpeg"
-        elif "image/webp" in header:
-            mime_type = "image/webp"
-        elif "image/gif" in header:
-            mime_type = "image/gif"
+        _, image_data = image_data.split("base64,", 1)
 
-    image_part = {
-        "mime_type": mime_type,
-        "data": base64.b64decode(image_data),
-    }
-
-    model = _gemini_model
+    image_bytes = base64.b64decode(image_data)
 
     try:
-        response = model.generate_content(
-            [payload.prompt, image_part],
-            generation_config={"response_mime_type": "application/json"},
-        )
+        bounds = {"left": 0, "top": 0, "width": 1920, "height": 1080}
+        result = plan_action_with_pipeline(image_bytes, payload.prompt, bounds, pipeline_config)
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Gemini API error: {exc}") from exc
+        raise HTTPException(status_code=502, detail=f"Model error: {exc}") from exc
 
-    raw_text = (response.text or "").strip()
-    if not raw_text:
-        raise HTTPException(status_code=502, detail="Gemini returned an empty response.")
-
-    try:
-        result = json.loads(raw_text)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Gemini returned invalid JSON: {raw_text}",
-        ) from exc
-
-    return result
+    return {"plan": result.plan, "debug": result.debug}
 
 
 @app.post("/api/record-action", response_model=RecordActionResponse)
@@ -437,7 +821,12 @@ def _run_task(task_name: str) -> None:
     global selected_monitor_index
 
     try:
-        execute_task(task_name, monitor_index=selected_monitor_index)
+        execute_task(
+            task_name,
+            monitor_index=selected_monitor_index,
+            vision_model=get_active_model(),
+            pipeline_config=pipeline_config,
+        )
         agent_status = AgentStatus.IDLE
     except Exception:
         agent_status = AgentStatus.REQUIRES_INTERVENTION
@@ -510,12 +899,16 @@ def execute_action(
     """
     target_monitor = monitor_index if monitor_index is not None else selected_monitor_index
     bounds = _monitor_bounds(target_monitor)
-    global_x = int(bounds.left + x)
-    global_y = int(bounds.top + y)
+    offset_x, offset_y = _get_monitor_offset(target_monitor)
+
+    adjusted_x = max(0, min(int(x + offset_x), max(0, bounds.width - 1)))
+    adjusted_y = max(0, min(int(y + offset_y), max(0, bounds.height - 1)))
+
+    global_x = int(bounds.left + adjusted_x)
+    global_y = int(bounds.top + adjusted_y)
 
     if action == "move":
         pyautogui.moveTo(global_x, global_y)
         return
 
-    pyautogui.moveTo(global_x, global_y)
     pyautogui.click(global_x, global_y)

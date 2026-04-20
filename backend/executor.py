@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 import json
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import google.generativeai as genai
 import mss
@@ -10,14 +12,32 @@ import mss.tools
 import pyautogui
 from dotenv import load_dotenv
 
+if TYPE_CHECKING:
+    from models.base import VisionModel
+    from pipeline import PipelineConfig
+
+try:
+    from .pipeline import detect_step_with_pipeline
+except ImportError:
+    from pipeline import detect_step_with_pipeline
+
 pyautogui.FAILSAFE = True
 
-load_dotenv()
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+ENV_PATHS = (
+    PROJECT_ROOT / ".env",
+    PROJECT_ROOT / ".env.local",
+    PROJECT_ROOT / "frontend" / ".env",
+    PROJECT_ROOT / "frontend" / ".env.local",
+)
 
-MODEL_NAME = "gemini-1.5-flash"
+for env_path in ENV_PATHS:
+    if env_path.exists():
+        load_dotenv(env_path, override=False)
+
+MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 ACTION_DELAY_SECONDS = float(os.getenv("EXECUTOR_ACTION_DELAY_SECONDS", "2"))
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TASKS_DIR = PROJECT_ROOT / "tasks"
 
 
@@ -182,14 +202,52 @@ def _apply_action(action: dict[str, Any], monitor: dict[str, int]) -> None:
         pyautogui.click()
 
 
-def execute_task(task_name: str, monitor_index: int = 1) -> None:
+def _detect_element_via_model(
+    vision_model: VisionModel,
+    intent: str,
+    screenshot_png: bytes,
+    monitor: dict[str, int],
+) -> dict[str, Any]:
+    """Use injected VisionModel to detect a UI element."""
+    result = vision_model.detect_element(screenshot_png, intent, monitor_bounds=monitor)
+    action_type = str(result.get("action_type", "click")).lower()
+    if action_type not in {"click", "type", "scroll"}:
+        action_type = "click"
+    return {
+        "x": int(result.get("x", 0)),
+        "y": int(result.get("y", 0)),
+        "action_type": action_type,
+        "text_to_type": str(result.get("text_to_type", "")),
+    }
+
+
+def execute_task(
+    task_name: str,
+    monitor_index: int = 1,
+    vision_model: VisionModel | None = None,
+    pipeline_config: PipelineConfig | None = None,
+) -> None:
+    """Run an SOP task using *vision_model* (falls back to Gemini if None)."""
     steps = _load_compiled_sop(task_name)
-    model = _build_model()
     monitor = _resolve_monitor(monitor_index)
 
     for step in steps:
         intent = str(step["intent"]).strip()
         screenshot_png = _capture_monitor_png(monitor)
-        action = _gemini_step_action(model, intent, screenshot_png)
+
+        if pipeline_config is not None:
+            action, _ = detect_step_with_pipeline(
+                screenshot_png,
+                intent,
+                monitor,
+                pipeline_config,
+            )
+        elif vision_model is not None:
+            action = _detect_element_via_model(vision_model, intent, screenshot_png, monitor)
+        else:
+            # Backward-compatible: use Gemini directly
+            model = _build_model()
+            action = _gemini_step_action(model, intent, screenshot_png)
+
         _apply_action(action, monitor)
         time.sleep(ACTION_DELAY_SECONDS)
